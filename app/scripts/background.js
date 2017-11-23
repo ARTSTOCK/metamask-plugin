@@ -1,16 +1,14 @@
-const urlUtil = require('url')
-const endOfStream = require('end-of-stream')
 const pipe = require('pump')
+const Dnode = require('dnode')
+const ObjectMultiplex = require('obj-multiplex')
 const log = require('loglevel')
-const extension = require('extensionizer')
 const LocalStorageStore = require('obs-store/lib/localStorage')
 const storeTransform = require('obs-store/lib/transform')
 const ExtensionPlatform = require('./platforms/extension')
 const Migrator = require('./lib/migrator/')
 const migrations = require('./migrations/')
-const PortStream = require('./lib/port-stream.js')
-const NotificationManager = require('./lib/notification-manager.js')
 const MetamaskController = require('./metamask-controller')
+const PostMessageDuplexStream = require('post-message-stream')
 const firstTimeState = require('./first-time-state')
 
 const STORAGE_KEY = 'metamask-config'
@@ -20,10 +18,6 @@ window.log = log
 log.setDefaultLevel(METAMASK_DEBUG ? 'debug' : 'warn')
 
 const platform = new ExtensionPlatform()
-const notificationManager = new NotificationManager()
-global.METAMASK_NOTIFIER = notificationManager
-
-let popupIsOpen = false
 
 // state persistence
 const diskStore = new LocalStorageStore({ storageKey: STORAGE_KEY })
@@ -88,66 +82,14 @@ function setupController (initState) {
   // connect to other contexts
   //
 
-  extension.runtime.onConnect.addListener(connectRemote)
-  function connectRemote (remotePort) {
-    const isMetaMaskInternalProcess = remotePort.name === 'popup' || remotePort.name === 'notification'
-    const portStream = new PortStream(remotePort)
-    if (isMetaMaskInternalProcess) {
-      // communication with popup
-      popupIsOpen = popupIsOpen || (remotePort.name === 'popup')
-      controller.setupTrustedCommunication(portStream, 'MetaMask')
-      // record popup as closed
-      if (remotePort.name === 'popup') {
-        endOfStream(portStream, () => {
-          popupIsOpen = false
-        })
-      }
-    } else {
-      // communication with page
-      const originDomain = urlUtil.parse(remotePort.sender.url).hostname
-      controller.setupUntrustedCommunication(portStream, originDomain)
-    }
+  function triggerUi () {
+    console.log('UI triggered!!')
   }
 
-  //
-  // User Interface setup
-  //
+  const backgroundStream = new PostMessageDuplexStream({
+    name: 'background',
+    target: 'embededbrowser',
+  })
 
-  updateBadge()
-  controller.txController.on('update:badge', updateBadge)
-  controller.messageManager.on('updateBadge', updateBadge)
-  controller.personalMessageManager.on('updateBadge', updateBadge)
-
-  // plugin badge text
-  function updateBadge () {
-    var label = ''
-    var unapprovedTxCount = controller.txController.getUnapprovedTxCount()
-    var unapprovedMsgCount = controller.messageManager.unapprovedMsgCount
-    var unapprovedPersonalMsgs = controller.personalMessageManager.unapprovedPersonalMsgCount
-    var unapprovedTypedMsgs = controller.typedMessageManager.unapprovedTypedMessagesCount
-    var count = unapprovedTxCount + unapprovedMsgCount + unapprovedPersonalMsgs + unapprovedTypedMsgs
-    if (count) {
-      label = String(count)
-    }
-    extension.browserAction.setBadgeText({ text: label })
-    extension.browserAction.setBadgeBackgroundColor({ color: '#506F8B' })
-  }
-
-  return Promise.resolve()
+  controller.setupTrustedCommunication(backgroundStream, 'MetaMask')
 }
-
-//
-// Etc...
-//
-
-// popup trigger
-function triggerUi () {
-  if (!popupIsOpen) notificationManager.showPopup()
-}
-
-// On first install, open a window to MetaMask website to how-it-works.
-extension.runtime.onInstalled.addListener(function (details) {
-  if ((details.reason === 'install') && (!METAMASK_DEBUG)) {
-    extension.tabs.create({url: 'https://metamask.io/#how-it-works'})
-  }
-})
